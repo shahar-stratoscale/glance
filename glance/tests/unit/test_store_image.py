@@ -15,7 +15,9 @@
 import mox
 
 from glance.common import exception
+from glance.common import qemuimg_utils
 import glance.store
+from glance.store import location as store_location
 from glance.tests.unit import utils as unit_test_utils
 from glance.tests import utils
 
@@ -851,6 +853,8 @@ class TestStoreAddToBackend(utils.BaseTestCase):
         (location,
          size,
          checksum,
+         conv_size,
+         conv_checksum,
          metadata) = glance.store.store_add_to_backend(self.image_id,
                                                        self.data,
                                                        self.size,
@@ -915,4 +919,147 @@ class TestStoreAddToBackend(utils.BaseTestCase):
                           self.data,
                           self.size,
                           store)
+        self.mox.VerifyAll()
+
+    def test_raw_images_only_good_path_qcow(self):
+        self.config(raw_images_only=True)
+        store = self.mox.CreateMockAnything()
+        source = self.mox.CreateMockAnything()
+        dest = self.mox.CreateMockAnything()
+        loc = self.mox.CreateMockAnything()
+        fake_qemu_info = self.mox.CreateMockAnything()
+        fake_qemu_info.file_format = 'qcow2'
+        self.mox.StubOutWithMock(qemuimg_utils, 'qemu_img_info')
+        self.mox.StubOutWithMock(qemuimg_utils, 'convert_image')
+        self.mox.StubOutWithMock(store_location, 'get_location_from_uri')
+        raw_conv_size = 50
+        raw_conv_checksum = "newcheck"
+
+        store.add_to_temporary(self.image_id,
+                               mox.IgnoreArg(),
+                               self.size).AndReturn(
+                               (source, dest, self.size, self.checksum))
+        qemuimg_utils.qemu_img_info(source.get_qemu_uri().AndReturn(
+            'foo')).AndReturn(fake_qemu_info)
+        qemuimg_utils.convert_image(source.get_qemu_uri().AndReturn('foo'),
+                                    dest.get_qemu_uri().AndReturn('bar'),
+                                    'raw')
+        store.finalize_raw(dest).AndReturn((self.location, raw_conv_size,
+                                            raw_conv_checksum, None))
+        store_location.get_location_from_uri(source.get_uri().AndReturn(
+            'foo')).AndReturn(loc)
+        store.delete(loc)
+
+        self.mox.ReplayAll()
+        (location,
+         size,
+         checksum,
+         conv_size,
+         conv_checksum,
+         metadata) = glance.store.store_add_to_backend(self.image_id,
+                                                       self.data,
+                                                       self.size,
+                                                       store)
+        self.mox.VerifyAll()
+        self.assertEqual(self.location, location)
+        self.assertEqual(self.size, size)
+        self.assertEqual(raw_conv_size, conv_size)
+        self.assertEqual(self.checksum, checksum)
+        self.assertEqual(raw_conv_checksum, conv_checksum)
+        self.assertEqual(None, metadata)
+
+    def test_raw_images_only_good_path_raw(self):
+        self.config(raw_images_only=True)
+        store = self.mox.CreateMockAnything()
+        source = self.mox.CreateMockAnything()
+        dest = self.mox.CreateMockAnything()
+        fake_qemu_info = self.mox.CreateMockAnything()
+        fake_qemu_info.file_format = 'raw'
+        self.mox.StubOutWithMock(qemuimg_utils, 'qemu_img_info')
+
+        store.add_to_temporary(self.image_id,
+                               mox.IgnoreArg(),
+                               self.size).AndReturn(
+                               (source, dest, self.size, self.checksum))
+        qemuimg_utils.qemu_img_info(source.get_qemu_uri().AndReturn(
+            'foo')).AndReturn(fake_qemu_info)
+        store.rename(source, dest)
+        store.finalize_raw(dest).AndReturn((self.location, self.size,
+                                            self.checksum, None))
+
+        self.mox.ReplayAll()
+        (location,
+         size,
+         checksum,
+         conv_size,
+         conv_checksum,
+         metadata) = glance.store.store_add_to_backend(self.image_id,
+                                                       self.data,
+                                                       self.size,
+                                                       store)
+        self.mox.VerifyAll()
+        self.assertEqual(self.location, location)
+        self.assertEqual(self.size, size)
+        self.assertEqual(self.size, conv_size)
+        self.assertEqual(self.checksum, checksum)
+        self.assertEqual(self.checksum, conv_checksum)
+        self.assertEqual(None, metadata)
+
+    def test_raw_images_only_qemu_img_info_fail(self):
+        self.config(raw_images_only=True)
+        store = self.mox.CreateMockAnything()
+        source = self.mox.CreateMockAnything()
+        dest = self.mox.CreateMockAnything()
+        loc = self.mox.CreateMockAnything()
+        exc = Exception('exception')
+        self.mox.StubOutWithMock(qemuimg_utils, 'qemu_img_info')
+        self.mox.StubOutWithMock(store_location, 'get_location_from_uri')
+
+        store.add_to_temporary(self.image_id,
+                               mox.IgnoreArg(),
+                               self.size).AndReturn(
+                               (source, dest, self.size, self.checksum))
+        qemuimg_utils.qemu_img_info(source.get_qemu_uri().AndReturn(
+            'foo')).AndRaise(exc)
+        store_location.get_location_from_uri(source.get_uri().AndReturn(
+            'foo')).AndReturn(loc)
+        store.delete(loc)
+
+        self.mox.ReplayAll()
+        self.assertRaises(Exception, glance.store.store_add_to_backend,
+                          self.image_id, self.data, self.size, store)
+        self.mox.VerifyAll()
+
+    def test_raw_images_only_qemu_img_conv_fail(self):
+        self.config(raw_images_only=True)
+        store = self.mox.CreateMockAnything()
+        source = self.mox.CreateMockAnything()
+        dest = self.mox.CreateMockAnything()
+        loc = self.mox.CreateMockAnything()
+        exc = Exception('exception')
+        fake_qemu_info = self.mox.CreateMockAnything()
+        fake_qemu_info.file_format = 'qcow2'
+        self.mox.StubOutWithMock(qemuimg_utils, 'qemu_img_info')
+        self.mox.StubOutWithMock(qemuimg_utils, 'convert_image')
+        self.mox.StubOutWithMock(store_location, 'get_location_from_uri')
+
+        store.add_to_temporary(self.image_id,
+                               mox.IgnoreArg(),
+                               self.size).AndReturn(
+                               (source, dest, self.size, self.checksum))
+        qemuimg_utils.qemu_img_info(source.get_qemu_uri().AndReturn(
+            'foo')).AndReturn(fake_qemu_info)
+        qemuimg_utils.convert_image(source.get_qemu_uri().AndReturn('foo'),
+                                    dest.get_qemu_uri().AndReturn('bar'),
+                                    'raw').AndRaise(exc)
+        store_location.get_location_from_uri(source.get_uri().AndReturn(
+            'foo')).AndReturn(loc)
+        store.delete(loc)
+        store_location.get_location_from_uri(dest.get_uri().AndReturn(
+            'foo')).AndReturn(loc)
+        store.delete(loc)
+
+        self.mox.ReplayAll()
+        self.assertRaises(Exception, glance.store.store_add_to_backend,
+                          self.image_id, self.data, self.size, store)
         self.mox.VerifyAll()

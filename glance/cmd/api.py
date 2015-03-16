@@ -43,6 +43,7 @@ from glance.common import config
 from glance.common import exception
 from glance.common import wsgi
 from glance.openstack.common import log
+from glance.openstack.common import systemd
 import glance.store
 
 
@@ -61,6 +62,7 @@ def main():
 
         server = wsgi.Server()
         server.start(config.load_paste_app('glance-api'), default_port=9292)
+        systemd.notify_once()
         server.wait()
     except exception.WorkerCreationFailure as e:
         fail(2, e)

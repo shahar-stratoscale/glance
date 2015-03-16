@@ -165,3 +165,12 @@ class Store(object):
                       write access for an image.
         """
         raise NotImplementedError
+
+    def add_to_temporary(self, image_id, image_file, image_size):
+        raise NotImplementedError
+
+    def rename(self, source, dest):
+        raise NotImplementedError
+
+    def finalize_raw(self, location):
+        raise NotImplementedError

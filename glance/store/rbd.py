@@ -20,6 +20,7 @@ from __future__ import with_statement
 
 import hashlib
 import math
+import urllib
 
 from oslo.config import cfg
 import six.moves.urllib.parse as urlparse
@@ -42,7 +43,7 @@ DEFAULT_POOL = 'images'
 DEFAULT_CONFFILE = '/etc/ceph/ceph.conf'
 DEFAULT_USER = None    # let librados decide based on the Ceph conf file
 DEFAULT_CHUNKSIZE = 8  # in MiB
-DEFAULT_SNAPNAME = 'snap'
+DEFAULT_SNAPNAME = 'clone_snap'
 
 LOG = logging.getLogger(__name__)
 
@@ -67,6 +68,14 @@ rbd_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(rbd_opts)
+
+def entryExit(f):
+    def _decorated(self, *args, **kwargs):
+        LOG.debug("Enter: %s" % f.__name__)
+        ret = f(self, *args, **kwargs)
+        LOG.debug("Exit: %s" % f.__name__)
+        return ret
+    return _decorated
 
 
 class StoreLocation(glance.store.location.StoreLocation):
@@ -100,6 +109,12 @@ class StoreLocation(glance.store.location.StoreLocation):
                                           safe_image, safe_snapshot)
         else:
             return "rbd://%s" % self.image
+
+    def get_qemu_uri(self):
+        assert(self.pool)
+        safe_pool = urllib.quote(self.pool, '')
+        safe_image = urllib.quote(self.image, '')
+        return "rbd:%s/%s" % (safe_pool, safe_image)
 
     def parse_uri(self, uri):
         prefix = 'rbd://'
@@ -260,6 +275,80 @@ class Store(glance.store.base.Store):
             librbd.create(ioctx, image_name, size, order, old_format=True)
             return StoreLocation({'image': image_name})
 
+    def _get_clone_info(self, image, image_name, snap):
+        try:
+            snap and image.set_snap(snap)
+            pool, parent, parent_snap = tuple(image.parent_info())
+            snap and image.set_snap(None)
+            if image_name.endswith('.deleted'):
+                image_name = image_name[:-len('.deleted')]
+            if ((parent_snap == "%s.clone_snap" % image_name) or
+                ((pool == self.pool) and (parent_snap == "clone_snap"))):
+                return pool, parent, parent_snap
+        except rbd.ImageNotFound:
+            LOG.debug(_("image %s is not a clone") % image_name)
+            image.set_snap(None)
+        return (None, None, None)
+
+    def _delete_clone_parent_refs(self, conn, parent_pool, parent_name,
+                                  parent_snap):
+        with conn.open_ioctx(parent_pool) as ioctx:
+            LOG.debug(_("considering deletion of candidate %s") % (parent_name))
+            parent_rbd = rbd.Image(ioctx, parent_name)
+            parent_has_snaps = False
+            try:
+                g_parent_pool, g_parent, g_parent_snap = self._get_clone_info(
+                        parent_rbd, parent_name, parent_snap)
+                LOG.debug(_("candidate's parent is %s") % (g_parent))
+
+                if parent_pool == self.pool and not parent_name.endswith('.deleted'):
+                    LOG.debug(_("skipping deletion of parent snapshot %s because in-use image") % (parent_snap))
+                else:
+                    LOG.debug(_("deleting parent snapshot %s") % (parent_snap))
+                    parent_rbd.unprotect_snap(parent_snap)
+                    parent_rbd.remove_snap(parent_snap)
+
+                parent_has_snaps = bool(list(parent_rbd.list_snaps()))
+            finally:
+                parent_rbd.close()
+
+            if (not parent_has_snaps) and parent_name.endswith('.deleted'):
+                LOG.debug(_("deleting parent %s") % (parent_name))
+                rbd.RBD().remove(ioctx, parent_name)
+
+        if g_parent:
+            self._delete_clone_parent_refs(conn, g_parent_pool, g_parent, g_parent_snap)
+
+    def _delete_image_with_snapshot(self, conn, ioctx, image_name,
+                                    snapshot_name):
+        image = rbd.Image(ioctx, image_name)
+        delete_image = False
+        pool = parent = parent_snap = None
+        try:
+            image.unprotect_snap(snapshot_name)
+        except rbd.ImageBusy:
+            log_msg = _("image %s is busy, renaming instead of deleting")
+            LOG.debug(log_msg % image_name)
+            new_name = "%s.deleted" % (image_name)
+            rbd.RBD().rename(ioctx, image_name, new_name)
+        else:
+            log_msg = _("image %s will now be deleted")
+            LOG.debug(log_msg % image_name)
+            pool, parent, parent_snap = self._get_clone_info(image,
+                                                             image_name,
+                                                             snapshot_name)
+            image.remove_snap(snapshot_name)
+            delete_image = True
+        finally:
+            image.close()
+
+        if delete_image:
+            rbd.RBD().remove(ioctx, image_name)
+            if parent:
+                LOG.debug(_("image is a clone so cleaning references"))
+                self._delete_clone_parent_refs(conn, pool, parent,
+                                               parent_snap)
+
     def _delete_image(self, image_name, snapshot_name=None):
         """
         Delete RBD image and snapshot.
@@ -273,23 +362,12 @@ class Store(glance.store.base.Store):
         with rados.Rados(conffile=self.conf_file, rados_id=self.user) as conn:
             with conn.open_ioctx(self.pool) as ioctx:
                 try:
-                    # First remove snapshot.
                     if snapshot_name is not None:
-                        with rbd.Image(ioctx, image_name) as image:
-                            try:
-                                image.unprotect_snap(snapshot_name)
-                            except rbd.ImageBusy:
-                                log_msg = _("snapshot %(image)s@%(snap)s "
-                                            "could not be unprotected because "
-                                            "it is in use")
-                                LOG.debug(log_msg %
-                                          {'image': image_name,
-                                           'snap': snapshot_name})
-                                raise exception.InUseByStore()
-                            image.remove_snap(snapshot_name)
-
-                    # Then delete image.
-                    rbd.RBD().remove(ioctx, image_name)
+                        self._delete_image_with_snapshot(conn, ioctx,
+                                                         image_name,
+                                                         snapshot_name)
+                    else:
+                        rbd.RBD().remove(ioctx, image_name)
                 except rbd.ImageNotFound:
                     raise exception.NotFound(
                         _("RBD image %s does not exist") % image_name)
@@ -299,7 +377,20 @@ class Store(glance.store.base.Store):
                     LOG.debug(log_msg % image_name)
                     raise exception.InUseByStore()
 
-    def add(self, image_id, image_file, image_size):
+    def _ensure_image_no_exist(self, image_name):
+        with rados.Rados(conffile=self.conf_file,
+                         rados_id=self.user) as conn:
+            with conn.open_ioctx(self.pool) as ioctx:
+                try:
+                    with rbd.Image(ioctx, image_name) as image:
+                        image.stat()
+                except rbd.ImageNotFound:
+                    return
+                else:
+                    raise exception.Duplicate(
+                        _('RBD image %s already exists') % image_name)
+
+    def _add(self, image_id, image_file, image_size, temporary=False):
         """
         Stores an image file with supplied identifier to the backend
         storage system and returns a tuple containing information
@@ -316,6 +407,9 @@ class Store(glance.store.base.Store):
         """
         checksum = hashlib.md5()
         image_name = str(image_id)
+        if temporary:
+            self._ensure_image_no_exist(image_name)
+            image_name += 'temp'
         with rados.Rados(conffile=self.conf_file, rados_id=self.user) as conn:
             fsid = None
             if hasattr(conn, 'get_fsid'):
@@ -357,7 +451,7 @@ class Store(glance.store.base.Store):
                                       (offset))
                             offset += image.write(chunk, offset)
                             checksum.update(chunk)
-                        if loc.snapshot:
+                        if loc.snapshot and not temporary:
                             image.create_snap(loc.snapshot)
                             image.protect_snap(loc.snapshot)
                 except Exception as exc:
@@ -373,8 +467,42 @@ class Store(glance.store.base.Store):
         if image_size == 0:
             image_size = bytes_written
 
-        return (loc.get_uri(), image_size, checksum.hexdigest(), {})
+        return (loc, image_size, checksum.hexdigest(), {})
 
+    @entryExit
+    def add(self, image_id, image_file, image_size):
+        LOG.debug("enter: add")
+        (loc, size, checksum, meta) = self._add(image_id, image_file, image_size)
+        return (loc.get_uri(), size, checksum, meta)
+
+    @entryExit
+    def add_to_temporary(self, image_id, image_file, image_size):
+        (loc, size, checksum, meta) = self._add(image_id, image_file, image_size, temporary=True)
+        dest = StoreLocation({'fsid': loc.fsid, 'pool': loc.pool, 'image': str(image_id), 'snapshot': loc.snapshot})
+        loc.snapshot = None
+        return (loc, dest, size, checksum)
+
+    @entryExit
+    def rename(self, source, dest):
+        with rados.Rados(conffile=self.conf_file, rados_id=self.user) as conn:
+            with conn.open_ioctx(self.pool) as ioctx:
+                rbd.RBD().rename(ioctx, source.image, dest.image)
+
+    @entryExit
+    def finalize_raw(self, location):
+        checksum = hashlib.md5()
+        for chunk in ImageIterator(location.image, self):
+            checksum.update(chunk)
+        with rados.Rados(conffile=self.conf_file, rados_id=self.user) as conn:
+            with conn.open_ioctx(self.pool) as ioctx:
+                with rbd.Image(ioctx, location.image) as image:
+                    img_info = image.stat()
+                    if location.snapshot:
+                        image.create_snap(location.snapshot)
+                        image.protect_snap(location.snapshot)
+        return (location.get_uri(), img_info['size'], checksum.hexdigest(), {})
+
+    @entryExit
     def delete(self, location):
         """
         Takes a `glance.store.location.Location` object that indicates

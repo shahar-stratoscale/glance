@@ -92,6 +92,8 @@ def upload_data_to_store(req, image_meta, image_data, store, notifier):
         (location,
          size,
          checksum,
+         conv_size,
+         conv_checksum,
          locations_metadata) = glance.store.store_add_to_backend(
              image_meta['id'],
              utils.CooperativeReader(image_data),
@@ -137,8 +139,11 @@ def upload_data_to_store(req, image_meta, image_data, store, notifier):
                   "to %(size)d"), {'image_id': image_id,
                                    'checksum': checksum,
                                    'size': size})
-        update_data = {'checksum': checksum,
-                       'size': size}
+        update_data = {'checksum': conv_checksum,
+                       'size': conv_size}
+        if CONF.raw_images_only:
+            update_data.update({'disk_format': 'raw',
+                                'container_format': 'bare'})
         try:
             image_meta = registry.update_image_metadata(req.context,
                                                         image_id,

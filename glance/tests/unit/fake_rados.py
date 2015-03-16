@@ -72,6 +72,9 @@ class mock_rbd(object):
         def __exit__(self, *args, **kwargs):
             pass
 
+        def set_snap(self, *args, **kwargs):
+            pass
+
         def create_snap(self, *args, **kwargs):
             pass
 

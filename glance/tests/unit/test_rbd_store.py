@@ -112,9 +112,20 @@ class TestStore(base.StoreClearingUnitTest):
         def _fake_remove(*args, **kwargs):
             self.called_commands_actual.append('remove')
 
+        def _fake_get_clone_info(image, image_name, snapshot_name):
+            if image_name == 'fake_image':
+                return('foo', 'bar.deleted', 'baz')
+            else:
+                return(None, None, None)
+
+        def _fake_list_snaps(*args, **kwargs):
+            return []
+
         self.stubs.Set(mock_rbd.RBD, 'remove', _fake_remove)
         self.stubs.Set(mock_rbd.Image, 'unprotect_snap', _fake_unprotect_snap)
         self.stubs.Set(mock_rbd.Image, 'remove_snap', _fake_remove_snap)
+        self.stubs.Set(self.store, '_get_clone_info', _fake_get_clone_info)
+        self.stubs.Set(mock_rbd.Image, 'list_snaps', _fake_get_clone_info)
         self.store._delete_image(self.location, snapshot_name='snap')
 
         self.called_commands_expected = ['unprotect_snap', 'remove_snap',
@@ -136,7 +147,11 @@ class TestStore(base.StoreClearingUnitTest):
             self.called_commands_actual.append('remove')
             raise mock_rbd.ImageNotFound()
 
+        def _fake_get_clone_info(*args, **kwargs):
+            return('foo', 'bar', 'baz')
+
         self.stubs.Set(mock_rbd.RBD, 'remove', _fake_remove)
+        self.stubs.Set(self.store, '_get_clone_info', _fake_get_clone_info)
         self.assertRaises(exception.NotFound, self.store._delete_image,
                           self.location, snapshot_name='snap')
 

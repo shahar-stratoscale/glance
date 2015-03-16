@@ -44,10 +44,9 @@ sys.path = [
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
 extensions = ['sphinx.ext.coverage',
               'sphinx.ext.ifconfig',
-              'sphinx.ext.intersphinx',
               'sphinx.ext.pngmath',
               'sphinx.ext.graphviz',
-              'oslosphinx',
+              'oslo.sphinx',
               ]
 
 # Add any paths that contain templates here, relative to this directory.

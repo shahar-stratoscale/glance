@@ -22,10 +22,8 @@ import six
 
 from glance.common import exception
 from glance.common import utils
-from glance.common import qemuimg_utils
 import glance.context
 import glance.domain.proxy
-from glance.openstack.common import excutils
 from glance.openstack.common import importutils
 import glance.openstack.common.log as logging
 from glance import scrubber
@@ -36,7 +34,6 @@ LOG = logging.getLogger(__name__)
 store_opts = [
     cfg.ListOpt('known_stores',
                 default=[
-                    'glance.store.mancala_driver.Store',
                     'glance.store.filesystem.Store',
                     'glance.store.http.Store'
                 ],
@@ -60,8 +57,6 @@ store_opts = [
     cfg.IntOpt('scrub_time', default=0,
                help=_('The amount of time in seconds to delay before '
                       'performing a delete.')),
-    cfg.BoolOpt('raw_images_only', default=False,
-                help=_('Convert any non-raw images to raw')),
 ]
 
 REGISTERED_STORES = set()
@@ -368,42 +363,6 @@ def check_location_metadata(val, key=''):
                                 'val': type(val)})
 
 
-def store_add_to_backend_as_raw(image_id, data, size, store):
-    def store_delete(store, loc):
-        loc = location.get_location_from_uri(loc.get_uri())
-        store.delete(loc)
-
-    LOG.debug("Storing image to raw format")
-    source, dest, size, checksum = store.add_to_temporary(image_id, data, size)
-    try:
-        image_format = qemuimg_utils.qemu_img_info(source.get_qemu_uri()).file_format
-    except Exception:
-        with excutils.save_and_reraise_exception():
-            store_delete(store, source)
-    LOG.debug("Got image information - format is %s", image_format)
-
-    if image_format != 'raw':
-        try:
-            qemuimg_utils.convert_image(source.get_qemu_uri(), dest.get_qemu_uri(), 'raw')
-            loc, conv_size, conv_checksum, metadata = store.finalize_raw(dest)
-            store_delete(store, source)
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                store_delete(store, dest)
-                store_delete(store, source)
-    else:
-        try:
-            store.rename(source, dest)
-            (loc, size, checksum, metadata) = store.finalize_raw(dest)
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                store_delete(store, dest)
-                store_delete(store, source)
-        conv_size = size
-        conv_checksum = checksum
-    return (loc, size, checksum, conv_size, conv_checksum, metadata)
-
-
 def store_add_to_backend(image_id, data, size, store):
     """
     A wrapper around a call to each stores add() method.  This gives glance
@@ -418,13 +377,7 @@ def store_add_to_backend(image_id, data, size, store):
              the checksum of the data
              the storage systems metadata dictionary for the location
     """
-    if CONF.raw_images_only:
-        (loc, size, checksum, conv_size, conv_checksum, metadata) = \
-                store_add_to_backend_as_raw(image_id, data, size, store)
-    else:
-        (loc, size, checksum, metadata) = store.add(image_id, data, size)
-        conv_size = size
-        conv_checksum = checksum
+    (location, size, checksum, metadata) = store.add(image_id, data, size)
     if metadata is not None:
         if not isinstance(metadata, dict):
             msg = (_("The storage driver %(store)s returned invalid metadata "
@@ -443,7 +396,7 @@ def store_add_to_backend(image_id, data, size, store):
                       'error': six.text_type(e)})
             LOG.error(e_msg)
             raise BackendException(e_msg)
-    return (loc, size, checksum, conv_size, conv_checksum, metadata)
+    return (location, size, checksum, metadata)
 
 
 def add_to_backend(context, scheme, image_id, data, size):
@@ -764,7 +717,7 @@ class ImageProxy(glance.domain.proxy.Image):
     def set_data(self, data, size=None):
         if size is None:
             size = 0  # NOTE(markwash): zero -> unknown size
-        location, size, checksum, conv_size, conv_checksum, loc_meta = self.store_api.add_to_backend(
+        location, size, checksum, loc_meta = self.store_api.add_to_backend(
             self.context, CONF.default_store,
             self.image.image_id, utils.CooperativeReader(data), size)
         self.image.locations = [{'url': location, 'metadata': loc_meta}]

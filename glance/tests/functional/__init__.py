@@ -356,6 +356,7 @@ swift_store_large_object_size = %(swift_store_large_object_size)s
 swift_store_large_object_chunk_size = %(swift_store_large_object_chunk_size)s
 swift_store_multi_tenant = %(swift_store_multi_tenant)s
 swift_store_admin_tenants = %(swift_store_admin_tenants)s
+raw_images_only = False
 rbd_store_chunk_size = %(rbd_store_chunk_size)s
 rbd_store_user = %(rbd_store_user)s
 rbd_store_pool = %(rbd_store_pool)s
